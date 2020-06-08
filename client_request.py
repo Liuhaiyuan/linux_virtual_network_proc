@@ -4,8 +4,8 @@ import logging
 
 logging.getLogger('scapy.runtime').setLevel(logging.ERROR)
 
-target_ip   = '192.168.1.1'
-target_port = 80
+target_ip   = '172.16.0.9'
+target_port = 9090
 data        = 'GET / HTTP/1.0 \r\n\r\n'
 
 def start_tcp(target_ip,target_port):
