@@ -28,9 +28,9 @@ def trans_data(target_ip,target_port,data):
     #print sport,s_seq,d_seq
     #发起GET请求
     ans = sr1(IP(dst=target_ip)/TCP(dport=target_port,sport=sport,seq=s_seq,ack=d_seq,flags=24)/data,verbose=False)
-    #ans.show()
+    ans.show()
     #读取服务端发来的数据
-    rcv = ans[Raw]
+    rcv = ans
     print rcv
 
 if __name__ == '__main__':
