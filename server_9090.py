@@ -1,27 +1,24 @@
-# -*- coding: utf-8 -*
-#!/usr/bin/env python
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
 
-
+import sys
+reload(sys)
+sys.setdefaultencoding('utf8')
 import socket
-
-ip_port = ('0.0.0.0', 9999)
-# 创建socket对象并指定连接的网络类型和传输协议
-sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sk.bind(ip_port)
-# 启动监听，并设置最多可以通知连入连接数
-sk.listen(5)
-
-while True:
-    print('server is waitting...')
-    '''
-    进入accept阻塞状态来等待客户端的连接请求
-    保存客户端的连接状态和客户端的地址
-    '''
-    conn,addr = sk.accept()
-    # print(addr)
-    # print(conn)
-    # 如果有客户端发来请求就每次都只接受1024个字节的内容，注意recv()也是阻塞的
-    client_data = conn.recv(1024)
-    print(client_data)
-    conn.send('I am server.'.encode('utf-8'))
+# 建立一个服务端
+server = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+server.bind(('0.0.0.0',9090))           #绑定要监听的端口
+server.listen(10000)                            #开始监听 表示可以使用五个链接排队
+while True:                                     # conn就是客户端链接过来而在服务端为期生成的一个链接实例
+    conn,addr = server.accept()                 #等待链接,多个链接的时候就会出现问题,其实返回了两个值
+    print(conn,addr)
+    while True:
+        try:
+            data = conn.recv(3000)                  #接收数据
+            print('recive:',data.decode())          #打印接收到的数据
+            conn.send(data.upper())                 #然后再发送数据
+        except Exception,e:
+            print '[-]有错误，请注意检查！'
+            print e
     conn.close()
+
