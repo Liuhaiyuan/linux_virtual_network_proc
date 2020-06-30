@@ -1,16 +1,20 @@
 [toc]
 
+# 虚拟网络运维------ Linux 内核配置相关问题记录
+
 ## 前言
 
 云计算网络方向运维时，经常会遇到各类网络场景问题，其中受到Linux内核配置的影响是存在一定的比例的， 此类问题相对比较复杂，不易排查，这里长期更新，将遇到的涉及Linux内核配置影响的运维问题记录；
 
 另外，涉及调整内核配置时，需要从实际需要出发，最好有相关数据的支撑，不建议随意调整内核参数。需要了解参数的具体作用，且注意同类型或版本环境的内核参数可能有所不同。并做好备份，方便回滚；
 
+Linux 内核相关官方文档：https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt
 
+[https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt](https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt)
 
-## 内核配置说明
+[ip-sysctl.txt](./docfile/ip-sysctl.txt)
 
-### 内核配置的查看和修改
+## 内核配置的查看和修改
 
 **查看内核参数**：使用 `cat` 查看对应文件的内容，例如执行命令 `cat /proc/sys/net/ipv4/tcp_tw_recycle` 查看 `net.ipv4.tcp_tw_recycle` 的值。
 
@@ -31,9 +35,9 @@
 
 
 
-### 内核参数配置概述
+## 重点内核参数配置详述
 
-#### nf_conntrack 
+### nf_conntrack 
 
 - `net.netfilter.nf_conntrack_buckets`
 - `net.nf_conntrack_max`
@@ -71,7 +75,7 @@ iptables -t raw -A OUTPUT -p tcp --sport 80 -j NOTRACK
 
 
 
-#### tcp_max_tw_buckets
+### tcp_max_tw_buckets
 
 `net.ipv4.tcp_max_tw_buckets`
 
@@ -102,11 +106,6 @@ sysctl -a | grep tcp_max_tw_buckets
 可能会出现两种异常情况：
  ① 对端服务器发完最后一个 Fin 包，没有收到当前服务器返回最后一个 Ack，又重发了 Fin 包，因为新的 TimeWait 没有办法创建 ，这个连接在当前服务器上就消失了，对端服务器将会收到一个 Reset 包。因为这个连接是明确要关闭的，所以收到一个 Reset 也不会有什么大问题。(但是违反了 TCP/IP 协议)
  ② 因为这个连接在当前服务器上消失，那么刚刚释放的端口可能被立刻使用，如果这时对端服务器没有释放连接，当前服务器就会收到对端服务器发来的 Reset 包。如果当前服务器是代理服务器，就可能会给用户返回 502 错误。(这种异常对服务或者用户是有影响的)
-
-作者：ZhiXiong
-链接：https://www.jianshu.com/p/b7e991be0909
-来源：简书
-著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
 
 当Linux实例的time_wait 连接数大于或等于配置参数时，Linux 实例 `/var/log/message` 日志全是类似 `kernel: TCP: time wait bucket table overflow` 的报错信息，提示 `time wait bucket table` 溢出，如下：
 
@@ -140,7 +139,7 @@ Feb 18 12:28:52 i-*** kernel: printk: 121 messages suppressed.
 
 
 
-#### tcp_fin_timeout
+### tcp_fin_timeout
 
 `net.ipv4.tcp_fin_timeout`
 
@@ -169,388 +168,9 @@ Feb 18 12:28:52 i-*** kernel: printk: 121 messages suppressed.
 
 
 
+## 其他内核参数配置概述
 
-
-## 运维问题记录
-
-### 问题1：client port 耗尽无法发起请求，概率性连接失败
-
-#### 问题现象
-
-client 概率性连接db实例失败，报错：`ERROR 2003(HY000):Can't connect to Mysql server on '192.168.192.28' (99)`
-
-![image-20200608105054688](docfile/image-20200608105054688.png)
-
-报错回显 google 后，发现是php相关回显，报错代码 99；
-
-![image-20200608105403604](docfile/image-20200608105403604.png)
-
-根据google 回显，判断是client 存在限制，另复测其他client 未出现该问题，server 端监控也未见异常；
-
-#### 原因分析
-
-检查client 连接数端口 `netstat -anptu | wc -l`
-
-![image-20200608112359056](docfile/image-20200608112359056.png)
-
-查看发现有大量time_wait状态连接，进一步检查client 端内核相关配置；
-
-![image-20200608113045537](docfile/image-20200608113045537.png)
-
-所以客户端 就是在 这个 范围 内，60999 - 32768 = 28231   满了之后就可能会导致无法分配新的客户端端口发起请求；
-
-```
-sysctl -a | grep port_range
-```
-
-由于大量time_wait 状态连接占用连接数，修改内核参数中对 time_wait 状态连接的最大数量，释放连接；
-
-```
-[root@c9c5b5d95-z7jlj /]# sysctl -a | grep tw
-net.ipv4.tcp_max_tw_buckets = 524288
-```
-
-#### 解决方案
-
-![image-20200608113632342](docfile/image-20200608113632342.png)
-
-规避修改后，问题规避；
-
-后续发现是由于db中缺少一张表，程序持续发起连接重试，导致有大量短连接请求，耗尽port，触发问题；
-
-*另此次问题client 是kubernetes pod，内核配置是pod内配置，pod跨node节点访问db实例：*
-
-*数据链路是pod -----> svc ----> LB ---- DB*
-
-*<u>另 kubernetes中，不能修改pod sysctl 内核配置中的tw参数，k8s  不能开 tw 参数，不能开tcp_tw_reuse 和tcp_tw_recycle，这两个参数开了后会影响nat转发；</u>*
-
-
-
-另外之前也遇到过，产品转发特性，会特定使用一些特定的端口，如果请求分配到这些端口时，就会出现请求报错或os 丢包；
-
-### 问题2：Linux OS NAT哈希表满导致丢包(nf_conntrack)
-
-#### 问题现象
-
-Linux 实例出现丢包、断连等网络异常现象；根据抓包等网络排查方案，定界丢包为该实例时；在系统日志中重复出现大量类似以下错误信息。
-
-```
-Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
-Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
-Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
-Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
-```
-
-#### 原因分析
-
-ip_conntrack是Linux系统内NAT的一个跟踪连接条目的模块。ip_conntrack模块会使用一个哈希表记录TCP协议“established connection”记录，当这个哈希表满之后，便会导致“`nf_conntrack: table full, dropping packet`”错误。Linux系统会开辟一个空间，用于维护每一个TCP链接，这个空间的大小与`nf_conntrack_buckets`、`nf_conntrack_max`参数相关，后者的默认值是前者的4倍，所以一般建议调大`nf_conntrack_max`参数值。
-
-> **说明**：系统维护连接比较消耗内存，请在系统空闲和内存充足的情况下调大`nf_conntrack_max`参数，且根据系统的情况而定。
-
-#### 解决方法
-
-**修改内核配置`net.nf_conntrack`对应配置参数；**
-
-**或 停止iptables(或 firewalld)服务，或添加iptables 规则禁止连接跟踪；**
-
-如果选择修改内核配置`net.nf_conntrack`对应配置参数，可参考如下操作：
-
-1. 执行以下命令，编辑系统内核配置。
-
-    ```
-    vi /etc/sysctl.conf
-    ```
-
-2. 修改哈希表项最大值参数`net.netfilter.nf_conntrack_max`为`655350`。
-
-3. 修改超时参数`net.netfilter.nf_conntrack_tcp_timeout_established`为`1200`，默认情况下超时时间是432000秒。
-
-4. 执行`sysctl -p`命令，使配置生效。
-
-
-
-### 问题3：报“Time wait bucket table overflow”错误（tcp_max_tw_buckets）
-
-> 此处涉及的内核参数为`net.ipv4.tcp_max_tw_buckets`。
-
-#### 问题现象
-
-- Linux实例的`/var/log/message`日志信息全是类似`kernel: TCP: time wait bucket table overflow`的报错信息，提示`time wait bucket table`”溢出，系统显示类似如下。
-
-    ```
-Feb 18 12:28:38 i-*** kernel: TCP: time wait bucket table overflow
-    Feb 18 12:28:44 i-*** kernel: printk: 227 messages suppressed.
-    Feb 18 12:28:44 i-*** kernel: TCP: time wait bucket table overflow
-    Feb 18 12:28:52 i-*** kernel: printk: 121 messages suppressed.
-Feb 18 12:28:52 i-*** kernel: TCP: time wait bucket table overflow
-    Feb 18 12:28:53 i-*** kernel: printk: 351 messages suppressed.
-Feb 18 12:28:53 i-*** kernel: TCP: time wait bucket table overflow
-    Feb 18 12:28:59 i-*** kernel: printk: 319 messages suppressed.
-    ```
-    
-- 执行以下命令，统计处于TIME_WAIT状态的TCP连接数，发现处于TIME_WAIT状态的TCP连接非常多。
-
-    ```
-    netstat -ant|grep TIME_WAIT|wc -l
-    ```
-
-#### 原因分析
-
-参数`net.ipv4.tcp_max_tw_buckets`可以调整内核中管理TIME_WAIT状态的数量。当实例中处于TIME_WAIT状态，及需要转换为TIME_WAIT状态的连接数之和超过`net.ipv4.tcp_max_tw_buckets`参数值时，message日志中将报“`time wait bucket table`” 错误，同时内核关闭超出参数值的部分TCP连接。您需要根据实际情况适当调高`net.ipv4.tcp_max_tw_buckets`参数，同时从业务层面去改进TCP连接。
-
-#### 解决方法
-
-1. 执行以下命令，统计TCP连接数。
-
-    ```
-    netstat -anp |grep tcp |wc -l
-    ```
-
-2. 执行以下命令，查询`net.ipv4.tcp_max_tw_buckets`参数。如果确认连接使用很高，则容易超出限制。
-
-    ```
-    vi /etc/sysctl.conf
-    ```
-
-1. 根据现场情况，增加`net.ipv4.tcp_max_tw_buckets`参数值的大小。
-
-1. 执行`sysctl -p`命令，使配置生效。
-
-
-
-### 问题4：Linux实例中FIN_WAIT2状态的TCP链接过多
-
-> **注意**：此处涉及的内核参数为`net.ipv4.tcp_fin_timeout`。
-
-#### 问题现象
-
-FIN_WAIT2状态的TCP链接过多。
-
-#### 原因分析
-
-- 在HTTP服务中，Server由于某种原因会主动关闭连接，例如KEEPALIVE超时的情况下。作为主动关闭连接的Server就会进入FIN_WAIT2状态。
-- 在TCP/IP协议栈中，存在半连接的概念，FIN_WAIT2状态不算超时，如果Client不关闭，FIN_WAIT2状态将保持到系统重启，越来越多的FIN_WAIT2状态会致使内核Crash。
-- 建议调小`net.ipv4.tcp_fin_timeout`参数的值，以便加快系统关闭处于`FIN_WAIT2`状态的TCP连接。
-
-#### 解决方法
-
-1. 执行
-
-    ```
-    vi /etc/sysctl.conf
-    ```
-
-    命令，修改或增加以下内容。
-
-    ```
-    net.ipv4.tcp_syncookies = 1
-    net.ipv4.tcp_fin_timeout = 30
-    net.ipv4.tcp_max_syn_backlog = 8192
-    net.ipv4.tcp_max_tw_buckets = 5000
-    ```
-
-2. 执行
-
-    ```
-    sysctl -p
-    ```
-
-    命令，使配置生效。
-
-    > **注意**：由于`FIN_WAIT2`状态的TCP连接会进入`TIME_WAIT`状态，请同时参见报“Time wait bucket table overflow”错误这个问题。
-
-### 问题5：Linux实例中出现大量CLOSE_WAIT状态的TCP连接
-
-#### 问题现象
-
-执行以下命令，发现当前系统中处于`CLOSE_WAIT`状态的TCP连接非常多。
-
-```
-netstat -atn|grep CLOSE_WAIT|wc -l
-```
-
-#### 原因分析
-
-根据实例上的业务量判断CLOSE_WAIT数量是否超出了正常的范围。TCP连接断开时需要进行四次挥手，TCP连接的两端都可以发起关闭连接的请求，若对端发起了关闭连接，但本地没有关闭连接，那么该连接就会处于CLOSE_WAIT状态。虽然该连接已经处于半开状态，但是已经无法和对端通信，需要及时的释放该连接。建议从业务层面及时判断某个连接是否已经被对端关闭，即在程序逻辑中对连接及时关闭，并进行检查。
-
-#### 解决方法
-
-编程语言中对应的读、写函数一般包含了检测CLOSE_WAIT状态的TCP连接功能，可通过执行以下命令，查看当前实例上处于CLOSE_WAIT状态的连接数。Java语言和C语言中关闭连接的方法如下。
-
-```
-netstat -an|grep CLOSE_WAIT|wc -l
-```
-
-**Java语言**
-
-1. 通过`read`方法来判断I/O 。当read方法返回`-1`时，则表示已经到达末尾。
-2. 通过`close`方法关闭该链接。
-
-**C语言**
-
-检查`read`的返回值。
-
-- 若等于0，则可以关闭该连接。
-- 若小于0，则查看error，若不是AGAIN，则同样可以关闭连接。
-
-### 问题6：客户端配置NAT后仍无法访问ECS或RDS远端服务器
-
-> **说明**：此处涉及的内核参数如下。
->
-> - `net.ipv4.tcp_tw_recycle`
-> - `net.ipv4.tcp_timestamps`
-
-#### 问题现象
-
-客户端配置NAT后无法访问远端ECS、RDS，包括配置了SNAT的VPC中的ECS实例。同时无法访问其他ECS或RDS等云产品，抓包检测发现远端ECS和RDS对客户端发送的SYN包没有响应。
-
-#### 原因分析
-
-若远端服务器的内核参数`net.ipv4.tcp_tw_recycle`和`net.ipv4.tcp_timestamps`的值都为1，则远端服务器会检查每一个报文中的时间戳（Timestamp），若Timestamp不是递增的关系，不会响应这个报文。配置NAT后，远端服务器看到来自不同客户端的源IP相同，但NAT前每一台客户端的时间可能会有偏差，报文中的Timestamp就不是递增的情况。
-
-#### 解决方法
-
-- 远端服务器为ECS时，修改`net.ipv4.tcp_tw_recycle`参数为0。
-- 远端服务器为RDS等PaaS服务时。RDS无法直接修改内核参数，需要在客户端上修改`net.ipv4.tcp_tw_recycle`参数和`net.ipv4.tcp_timestamps`参数为0。
-
-### 问题7：存在大量处于TIME_WAIT状态的连接
-
-> **说明**：此处涉及的内核参数如下。
->
-> - net.ipv4.tcp_syncookies
-> - net.ipv4.tcp_tw_reuse
-> - net.ipv4.tcp_tw_recycle
-> - net.ipv4.tcp_fin_timeout
-
-#### 问题现象
-
-云服务器中存在大量处于TIME_WAIT状态的连接。
-
-#### 原因分析
-
-首先通过调用close()发起主动关闭，在发送最后一个ACK之后会进入time_wait的状态，该发送方会保持2MSL时间之后才会回到初始状态。MSL值是数据包在网络中的最大生存时间。产生这种结果使得这个TCP连接在2MSL连接等待期间，定义这个连接的四元组（客户端IP地址和端口，服务端IP地址和端口号）不能被使用。
-
-#### 解决方法
-
-通过`netstat`或`ss`命令，可以看到大量处于TIME_WAIT状态的连接。
-
-1. 执行以下命令，查看TIME_WAIT状态的连接数量。
-
-    ```
-    netstat -n | awk '/^tcp/ {++y[$NF]} END {for(w in y) print w, y[w]}'
-    ```
-
-2. 执行以下命令，编辑系统内核配置。
-
-    ```
-    vi /etc/sysctl.conf
-    ```
-
-    修改或加入以下内容。
-
-    ```
-    net.ipv4.tcp_syncookies = 1 
-    net.ipv4.tcp_tw_reuse = 1 
-    net.ipv4.tcp_tw_recycle = 1
-    net.ipv4.tcp_fin_timeout = 30
-    ```
-
-3. 执行命令以下命令，使配置生效。
-
-    ```
-    /sbin/sysctl -p 
-    ```
-
-### 问题七：服务端断开连接后客户端仍然可以看到是建立连接的
-
-> **注意**：此处涉及的内核参数为`net.ipv4.tcp_fin_timeout`。
-
-#### 问题现象
-
-服务端A与客户端B建立了TCP连接，之后服务端A主动断开了连接，但是在客户端B上仍然看到连接是建立的。
-
-[![img](docfile/fa42e048-fd6f-4ddc-a742-6686aebf3a71.png)](https://onekb.oss-cn-zhangjiakou.aliyuncs.com/1264869/fa42e048-fd6f-4ddc-a742-6686aebf3a71.png)
-
-[![clienta](docfile/clienta.png)](http://docs-aliyun.cn-hangzhou.oss.aliyun-inc.com/assets/pic/52868/cn_zh/1502674853044/clienta.png)
-
-#### 原因分析
-
-通常是由于修改了服务端默认的`net.ipv4.tcp_fin_timeout`内核参数所致。
-
-#### 解决方法
-
-1. 执行以下命令，修改配置，设置
-
-    ```
-    net.ipv4.tcp_fin_timeout=30
-    ```
-
-    。
-
-    ```
-     vi /etc/sysctl.conf
-    ```
-
-2. 执行以下命令，使配置生效。
-
-    ```
-    sysctl -p
-    ```
-
-#### 问题八：无法在本地网络环境通过SSH连接Linux实例
-
-> **说明**：此处涉及的内核参数如下。
->
-> - net.ipv4.tcp_tw_recycle
-> - net.ipv4.tcp_timestamps
-
-##### 问题现象
-
-无法在本地网络环境通过SSH连接Linux实例，或者访问该Linux实例上的HTTP业务出现异常。Telnet测试会被reset。
-
-##### 原因分析
-
-如果您的本地网络是NAT共享方式上网，该问题可能是由于本地NAT环境和目标Linux相关内核参数配置不匹配导致。尝试通过修改目标Linux实例内核参数来解决问题。
-
-1. 远程连接目标Linux实例。
-
-2. 执行如下命令，查看当前配置。
-
-    ```
-    cat /proc/sys/net/ipv4/tcp_tw_recycle
-    cat /proc/sys/net/ipv4/tcp_timestamps
-    ```
-
-3. 查看上述两个配置的值是否为**0**，如果为**1**，NAT环境下的请求可能会导致上述问题。
-
-##### 解决方法
-
-通过如下方式将上述参数值修改为0。
-
-1. 执行如下命令，修改配置文件。
-
-    ```
-    vi /etc/sysctl.conf
-    ```
-
-2. 添加如下内容。
-
-    ```
-    net.ipv4.tcp_tw_recycle=0
-    net.ipv4.tcp_timestamps=0
-    ```
-
-3. 执行如下命令，使配置生效。
-
-    ```
-    sysctl -p 
-    ```
-
-4. 重新SSH登录实例，或者进行业务访问测试。
-
-### 文档涉及的Linux内核参数说明
-
-文档涉及的Linux内核参数说明如下，可参考如下参数说明进行相关操作。
+这里将其他的配置参数简单描述如下：
 
 | 参数                                               | 描述                                                         |
 | :------------------------------------------------- | :----------------------------------------------------------- |
@@ -589,5 +209,380 @@ netstat -an|grep CLOSE_WAIT|wc -l
 | net.netfilter.nf_conntrack_tcp_timeout_established | 在指定之间内，已经建立的连接如果没有活动，则通过iptables进行清除。 |
 | net.netfilter.nf_conntrack_max                     | 哈希表项最大值。                                             |
 
- 
+## 运维问题记录
+
+### 问题1：client port 耗尽无法发起请求，概率性连接失败
+
+**问题现象**
+
+client 概率性连接db实例失败，报错：`ERROR 2003(HY000):Can't connect to Mysql server on '192.168.192.28' (99)`
+
+![image-20200608105054688](docfile/image-20200608105054688.png)
+
+报错回显 google 后，发现是php相关回显，报错代码 99；
+
+![image-20200608105403604](docfile/image-20200608105403604.png)
+
+根据google 回显，判断是client 存在限制，另复测其他client 未出现该问题，server 端监控也未见异常；
+
+**原因分析**
+
+检查client 连接数端口 `netstat -anptu | wc -l`
+
+![image-20200608112359056](docfile/image-20200608112359056.png)
+
+查看发现有大量time_wait状态连接，进一步检查client 端内核相关配置；
+
+![image-20200608113045537](docfile/image-20200608113045537.png)
+
+所以客户端 就是在 这个 范围 内，60999 - 32768 = 28231   满了之后就可能会导致无法分配新的客户端端口发起请求；
+
+```
+sysctl -a | grep port_range
+```
+
+由于大量time_wait 状态连接占用连接数，修改内核参数中对 time_wait 状态连接的最大数量，释放连接；
+
+```
+[root@c9c5b5d95-z7jlj /]# sysctl -a | grep tw
+net.ipv4.tcp_max_tw_buckets = 524288
+```
+
+**解决方案**
+
+![image-20200608113632342](docfile/image-20200608113632342.png)
+
+规避修改后，问题规避；
+
+后续发现是由于db中缺少一张表，程序持续发起连接重试，导致有大量短连接请求，耗尽port，触发问题；
+
+*另此次问题client 是kubernetes pod，内核配置是pod内配置，pod跨node节点访问db实例：*
+
+*数据链路是pod -----> svc ----> LB ---- DB*
+
+*<u>另 kubernetes中，不能修改pod sysctl 内核配置中的tw参数，k8s  不能开 tw 参数，不能开tcp_tw_reuse 和tcp_tw_recycle，这两个参数开了后会影响nat转发；</u>*
+
+
+
+另外之前也遇到过，产品转发特性，会特定使用一些特定的端口，如果请求分配到这些端口时，就会出现请求报错或os 丢包；
+
+### 问题2：Linux OS NAT哈希表满导致丢包(nf_conntrack)
+
+问题现象
+
+Linux 实例出现丢包、断连等网络异常现象；根据抓包等网络排查方案，定界丢包为该实例时；在系统日志中重复出现大量类似以下错误信息。
+
+```
+Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
+Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
+Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
+Feb  6 16:05:07 i-*** kernel: nf_conntrack: table full, dropping packet.
+```
+
+原因分析
+
+ip_conntrack是Linux系统内NAT的一个跟踪连接条目的模块。ip_conntrack模块会使用一个哈希表记录TCP协议“established connection”记录，当这个哈希表满之后，便会导致“`nf_conntrack: table full, dropping packet`”错误。Linux系统会开辟一个空间，用于维护每一个TCP链接，这个空间的大小与`nf_conntrack_buckets`、`nf_conntrack_max`参数相关，后者的默认值是前者的4倍，所以一般建议调大`nf_conntrack_max`参数值。
+
+> **说明**：系统维护连接比较消耗内存，请在系统空闲和内存充足的情况下调大`nf_conntrack_max`参数，且根据系统的情况而定。
+
+解决方法
+
+**修改内核配置`net.nf_conntrack`对应配置参数；**
+
+**或 停止iptables(或 firewalld)服务，或添加iptables 规则禁止连接跟踪；**
+
+如果选择修改内核配置`net.nf_conntrack`对应配置参数，可参考如下操作：
+
+1. 执行以下命令，编辑系统内核配置。
+
+    ```
+    vi /etc/sysctl.conf
+    ```
+
+2. 修改哈希表项最大值参数`net.netfilter.nf_conntrack_max`为`655350`。
+
+3. 修改超时参数`net.netfilter.nf_conntrack_tcp_timeout_established`为`1200`，默认情况下超时时间是432000秒。
+
+4. 执行`sysctl -p`命令，使配置生效。
+
+
+
+### 问题3：报“Time wait bucket table overflow”错误（tcp_max_tw_buckets）
+
+> 此处涉及的内核参数为`net.ipv4.tcp_max_tw_buckets`。
+
+问题现象
+
+- Linux实例的`/var/log/message`日志信息全是类似`kernel: TCP: time wait bucket table overflow`的报错信息，提示`time wait bucket table`”溢出，系统显示类似如下。
+
+    ```
+Feb 18 12:28:38 i-*** kernel: TCP: time wait bucket table overflow
+    Feb 18 12:28:44 i-*** kernel: printk: 227 messages suppressed.
+    Feb 18 12:28:44 i-*** kernel: TCP: time wait bucket table overflow
+    Feb 18 12:28:52 i-*** kernel: printk: 121 messages suppressed.
+Feb 18 12:28:52 i-*** kernel: TCP: time wait bucket table overflow
+    Feb 18 12:28:53 i-*** kernel: printk: 351 messages suppressed.
+Feb 18 12:28:53 i-*** kernel: TCP: time wait bucket table overflow
+    Feb 18 12:28:59 i-*** kernel: printk: 319 messages suppressed.
+    ```
+    
+- 执行以下命令，统计处于TIME_WAIT状态的TCP连接数，发现处于TIME_WAIT状态的TCP连接非常多。
+
+    ```
+    netstat -ant|grep TIME_WAIT|wc -l
+    ```
+
+原因分析
+
+参数`net.ipv4.tcp_max_tw_buckets`可以调整内核中管理TIME_WAIT状态的数量。当实例中处于TIME_WAIT状态，及需要转换为TIME_WAIT状态的连接数之和超过`net.ipv4.tcp_max_tw_buckets`参数值时，message日志中将报“`time wait bucket table`” 错误，同时内核关闭超出参数值的部分TCP连接。您需要根据实际情况适当调高`net.ipv4.tcp_max_tw_buckets`参数，同时从业务层面去改进TCP连接。
+
+解决方法
+
+1. 执行以下命令，统计TCP连接数。
+
+    ```
+    netstat -anp |grep tcp |wc -l
+    ```
+
+2. 执行以下命令，查询`net.ipv4.tcp_max_tw_buckets`参数。如果确认连接使用很高，则容易超出限制。
+
+    ```
+    vi /etc/sysctl.conf
+    ```
+
+1. 根据现场情况，增加`net.ipv4.tcp_max_tw_buckets`参数值的大小。
+
+1. 执行`sysctl -p`命令，使配置生效。
+
+
+
+### 问题4：Linux实例中FIN_WAIT2状态的TCP链接过多
+
+> **注意**：此处涉及的内核参数为`net.ipv4.tcp_fin_timeout`。
+
+问题现象
+
+FIN_WAIT2状态的TCP链接过多。
+
+原因分析
+
+- 在HTTP服务中，Server由于某种原因会主动关闭连接，例如KEEPALIVE超时的情况下。作为主动关闭连接的Server就会进入FIN_WAIT2状态。
+- 在TCP/IP协议栈中，存在半连接的概念，FIN_WAIT2状态不算超时，如果Client不关闭，FIN_WAIT2状态将保持到系统重启，越来越多的FIN_WAIT2状态会致使内核Crash。
+- 建议调小`net.ipv4.tcp_fin_timeout`参数的值，以便加快系统关闭处于`FIN_WAIT2`状态的TCP连接。
+
+解决方法
+
+1. 执行
+
+    ```
+    vi /etc/sysctl.conf
+    ```
+
+    命令，修改或增加以下内容。
+
+    ```
+    net.ipv4.tcp_syncookies = 1
+    net.ipv4.tcp_fin_timeout = 30
+    net.ipv4.tcp_max_syn_backlog = 8192
+    net.ipv4.tcp_max_tw_buckets = 5000
+    ```
+
+2. 执行
+
+    ```
+    sysctl -p
+    ```
+
+    命令，使配置生效。
+
+    > **注意**：由于`FIN_WAIT2`状态的TCP连接会进入`TIME_WAIT`状态，请同时参见报“Time wait bucket table overflow”错误这个问题。
+
+### 问题5：Linux实例中出现大量CLOSE_WAIT状态的TCP连接
+
+问题现象
+
+执行以下命令，发现当前系统中处于`CLOSE_WAIT`状态的TCP连接非常多。
+
+```
+netstat -atn|grep CLOSE_WAIT|wc -l
+```
+
+原因分析
+
+根据实例上的业务量判断CLOSE_WAIT数量是否超出了正常的范围。TCP连接断开时需要进行四次挥手，TCP连接的两端都可以发起关闭连接的请求，若对端发起了关闭连接，但本地没有关闭连接，那么该连接就会处于CLOSE_WAIT状态。虽然该连接已经处于半开状态，但是已经无法和对端通信，需要及时的释放该连接。建议从业务层面及时判断某个连接是否已经被对端关闭，即在程序逻辑中对连接及时关闭，并进行检查。
+
+解决方法
+
+编程语言中对应的读、写函数一般包含了检测CLOSE_WAIT状态的TCP连接功能，可通过执行以下命令，查看当前实例上处于CLOSE_WAIT状态的连接数。Java语言和C语言中关闭连接的方法如下。
+
+```
+netstat -an|grep CLOSE_WAIT|wc -l
+```
+
+**Java语言**
+
+1. 通过`read`方法来判断I/O 。当read方法返回`-1`时，则表示已经到达末尾。
+2. 通过`close`方法关闭该链接。
+
+**C语言**
+
+检查`read`的返回值。
+
+- 若等于0，则可以关闭该连接。
+- 若小于0，则查看error，若不是AGAIN，则同样可以关闭连接。
+
+### 问题6：客户端配置NAT后仍无法访问ECS或RDS远端服务器
+
+> **说明**：此处涉及的内核参数如下。
+>
+> - `net.ipv4.tcp_tw_recycle`
+> - `net.ipv4.tcp_timestamps`
+
+问题现象
+
+客户端配置NAT后无法访问远端ECS、RDS，包括配置了SNAT的VPC中的ECS实例。同时无法访问其他ECS或RDS等云产品，抓包检测发现远端ECS和RDS对客户端发送的SYN包没有响应。
+
+原因分析
+
+若远端服务器的内核参数`net.ipv4.tcp_tw_recycle`和`net.ipv4.tcp_timestamps`的值都为1，则远端服务器会检查每一个报文中的时间戳（Timestamp），若Timestamp不是递增的关系，不会响应这个报文。配置NAT后，远端服务器看到来自不同客户端的源IP相同，但NAT前每一台客户端的时间可能会有偏差，报文中的Timestamp就不是递增的情况。
+
+解决方法
+
+- 远端服务器为ECS时，修改`net.ipv4.tcp_tw_recycle`参数为0。
+- 远端服务器为RDS等PaaS服务时。RDS无法直接修改内核参数，需要在客户端上修改`net.ipv4.tcp_tw_recycle`参数和`net.ipv4.tcp_timestamps`参数为0。
+
+### 问题7：存在大量处于TIME_WAIT状态的连接
+
+> **说明**：此处涉及的内核参数如下。
+>
+> - net.ipv4.tcp_syncookies
+> - net.ipv4.tcp_tw_reuse
+> - net.ipv4.tcp_tw_recycle
+> - net.ipv4.tcp_fin_timeout
+
+问题现象
+
+云服务器中存在大量处于TIME_WAIT状态的连接。
+
+原因分析
+
+首先通过调用close()发起主动关闭，在发送最后一个ACK之后会进入time_wait的状态，该发送方会保持2MSL时间之后才会回到初始状态。MSL值是数据包在网络中的最大生存时间。产生这种结果使得这个TCP连接在2MSL连接等待期间，定义这个连接的四元组（客户端IP地址和端口，服务端IP地址和端口号）不能被使用。
+
+解决方法
+
+通过`netstat`或`ss`命令，可以看到大量处于TIME_WAIT状态的连接。
+
+1. 执行以下命令，查看TIME_WAIT状态的连接数量。
+
+    ```
+    netstat -n | awk '/^tcp/ {++y[$NF]} END {for(w in y) print w, y[w]}'
+    ```
+
+2. 执行以下命令，编辑系统内核配置。
+
+    ```
+    vi /etc/sysctl.conf
+    ```
+
+    修改或加入以下内容。
+
+    ```
+    net.ipv4.tcp_syncookies = 1 
+    net.ipv4.tcp_tw_reuse = 1 
+    net.ipv4.tcp_tw_recycle = 1
+    net.ipv4.tcp_fin_timeout = 30
+    ```
+
+3. 执行命令以下命令，使配置生效。
+
+    ```
+    /sbin/sysctl -p 
+    ```
+
+### 问题8：服务端断开连接后客户端仍然可以看到是建立连接的
+
+> **注意**：此处涉及的内核参数为`net.ipv4.tcp_fin_timeout`。
+
+问题现象
+
+服务端A与客户端B建立了TCP连接，之后服务端A主动断开了连接，但是在客户端B上仍然看到连接是建立的。
+
+[![img](docfile/fa42e048-fd6f-4ddc-a742-6686aebf3a71.png)](https://onekb.oss-cn-zhangjiakou.aliyuncs.com/1264869/fa42e048-fd6f-4ddc-a742-6686aebf3a71.png)
+
+[![clienta](docfile/clienta.png)](http://docs-aliyun.cn-hangzhou.oss.aliyun-inc.com/assets/pic/52868/cn_zh/1502674853044/clienta.png)
+
+原因分析
+
+通常是由于修改了服务端默认的`net.ipv4.tcp_fin_timeout`内核参数所致。
+
+解决方法
+
+1. 执行以下命令，修改配置，设置
+
+    ```
+    net.ipv4.tcp_fin_timeout=30
+    ```
+
+    。
+
+    ```
+     vi /etc/sysctl.conf
+    ```
+
+2. 执行以下命令，使配置生效。
+
+    ```
+    sysctl -p
+    ```
+
+### 问题9：无法在本地网络环境通过SSH连接Linux实例
+
+> **说明**：此处涉及的内核参数如下。
+>
+> - net.ipv4.tcp_tw_recycle
+> - net.ipv4.tcp_timestamps
+
+问题现象
+
+无法在本地网络环境通过SSH连接Linux实例，或者访问该Linux实例上的HTTP业务出现异常。Telnet测试会被reset。
+
+原因分析
+
+如果您的本地网络是NAT共享方式上网，该问题可能是由于本地NAT环境和目标Linux相关内核参数配置不匹配导致。尝试通过修改目标Linux实例内核参数来解决问题。
+
+1. 远程连接目标Linux实例。
+
+2. 执行如下命令，查看当前配置。
+
+    ```
+    cat /proc/sys/net/ipv4/tcp_tw_recycle
+    cat /proc/sys/net/ipv4/tcp_timestamps
+    ```
+
+3. 查看上述两个配置的值是否为**0**，如果为**1**，NAT环境下的请求可能会导致上述问题。
+
+解决方法
+
+通过如下方式将上述参数值修改为0。
+
+1. 执行如下命令，修改配置文件。
+
+    ```
+    vi /etc/sysctl.conf
+    ```
+
+2. 添加如下内容。
+
+    ```
+    net.ipv4.tcp_tw_recycle=0
+    net.ipv4.tcp_timestamps=0
+    ```
+
+3. 执行如下命令，使配置生效。
+
+    ```
+    sysctl -p 
+    ```
+
+4. 重新SSH登录实例，或者进行业务访问测试。
 
